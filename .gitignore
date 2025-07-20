@@ -1,0 +1,13 @@
+#zip files and enwik files
+*.zip
+enwik8*
+# Python cache files
+__pycache__/
+# wandb files
+wandb/
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# pycharm files
+.idea/
+# VS Code files
+.vscode/
