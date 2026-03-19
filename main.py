@@ -6,8 +6,7 @@ import wandb
 from dataset import download_enwik8, ByteSequenceDataset
 from model import Encoder, Decoder
 
-def cosine_loss(h_pred, h_true):
-    return (1.0 - (h_pred * h_true).sum(dim=-1)).mean()
+sqrt_beta = 0.1
 
 def train_model():
     wandb.init(project="enwik8-per-step-model", config={
@@ -25,8 +24,8 @@ def train_model():
     dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
 
-    encoder = Encoder(cfg.batch_size, cfg.state_dim).to(device)
-    decoder = Decoder(cfg.batch_size, cfg.state_dim).to(device)
+    encoder = Encoder(cfg.state_dim).to(device)
+    decoder = Decoder(cfg.state_dim).to(device)
     opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=cfg.lr)
 
     global_step = 0
@@ -34,21 +33,33 @@ def train_model():
         for batch in loader:
             x_seq = batch.to(device)
             h = torch.zeros((cfg.batch_size, cfg.state_dim), device=device)
-            h[:, 0] = 1.0  # Initialize first state to unit vector
-            h += 0.01 * torch.randn_like(h)  # Add small noise to initial state
-            h = F.normalize(h, dim=-1)  # Normalize initial state to unit norm
+            h[:, 0] = 1.0 # initial h with first dimension set to 1, rest 0
             for t in range(x_seq.size(1)):
                 x_t = x_seq[:, t]
-                h_next = encoder(h, x_t)
-                #add small noise to h_next
-                h_next = h_next + 0.01 * torch.randn_like(h_next)
-                #normalize h_next to unit norm
-                h_next = F.normalize(h_next, dim=-1)
-                h_recon, logits = decoder(h_next)
 
-                loss_h = cosine_loss(h_recon, h)
+                # encoder output on sphere
+                h_next = F.normalize(encoder(h, x_t), dim=-1)
+
+                # tangent space langevin noise
+                noise = torch.randn_like(h_next)
+                noise = noise - (noise * h_next).sum(dim=-1, keepdim=True) * h_next
+                h_next_noised = F.normalize(h_next + sqrt_beta * noise, dim=-1)
+
+                # decoder reconstructs previous state and input
+                h_recon, logits = decoder(h_next_noised)
+                h_recon = F.normalize(h_recon, dim=-1)
+
+                # cosine loss on sphere, CE loss for bytes
+                loss_h = 1 - (h_recon * h.detach()).sum(dim=-1).mean()
                 loss_x = F.cross_entropy(logits, x_t)
-                loss = loss_h + loss_x
+
+                # cosine similarity matrix over batch
+                S = h_next @ h_next.T  # (B, B)
+                # penalize off-diagonal similarities
+                mask = 1 - torch.eye(cfg.batch_size, device=device)
+                loss_spread = (S * mask).pow(2).mean()
+
+                loss = loss_h + loss_x #+ 0.1 * loss_spread
 
                 opt.zero_grad()
                 loss.backward()
@@ -56,25 +67,30 @@ def train_model():
 
                 if global_step % cfg.log_interval == 0:
                     wandb.log({
-                        "loss": loss.item(),
-                        "cosine_loss": loss_h.item(),
-                        "ce_x": loss_x.item(),
-                        "mean_state_norm": h_next.norm(dim=-1).mean().item(),
-                        "mean_state_std": h.std(dim=0).mean().item(),
-                        "delta_norm": (h_next - h).norm(dim=-1).mean().item(),
-                        "h_variance": h.var(dim=0).mean().item(),
-                        "mean_cos_sim": (F.normalize(h_recon, dim=-1) * h).sum(dim=-1).mean().item(),
+                        "loss/total": loss.item(),
+                        "loss/cos_h": loss_h.item(),
+                        "loss/ce_x": loss_x.item(),
+                        "loss/spread": loss_spread.item(),
+                        "loss/ratio_h_to_x": loss_h.item() / (loss_x.item() + 1e-8),
+                        "state/mean_norm": h_next.norm(dim=-1).mean().item(),
+                        "state/mean_std": h.std(dim=0).mean().item(),
+                        "state/delta_norm": (h_next - h).norm(dim=-1).mean().item(),
+                        "state/h_variance": h.var(dim=0).mean().item(),
+                        "state/mean_cos_sim": (F.normalize(h_recon, dim=-1) * h).sum(dim=-1).mean().item(),
                         "step": global_step,
                     })
                     print(f"\rEpoch {epoch+1}/{cfg.epochs}, Step {global_step}, Loss: {loss.item():.4f}", end='', flush=True)
 
                 h = h_next.detach()
                 global_step += 1
+
             with torch.no_grad():
                 h_seq = [torch.zeros_like(h) for _ in range(x_seq.size(1) + 1)]
-                h_seq[0][:, 0] = 1.0  # initial h_0
+                # Initialize h_seq[0] with the same initial state as training
+                h_seq[0][:, 0] = 1.0
                 for t in range(x_seq.size(1)):
                     h_seq[t + 1] = encoder(h_seq[t], x_seq[:, t])
+                    h_seq[t + 1] = F.normalize(h_seq[t + 1], dim=-1)  # ensure unit norm
 
                 h_rev = h_seq[-1]
                 x_correct = [] #binary if reconstruction is correct
@@ -82,6 +98,7 @@ def train_model():
                 for t in reversed(range(x_seq.size(1))):
                     correct_token = x_seq[:, t] # ground truth token for timestep t
                     h_recon, logits = decoder(h_rev)
+                    h_recon = F.normalize(h_recon, dim=-1)  # ensure unit norm
                     h_rev = h_recon
                     pred_token = logits.argmax(dim=-1)
                     is_correct = (pred_token == correct_token)
