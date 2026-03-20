@@ -9,7 +9,7 @@ from model import Encoder, Decoder
 sqrt_beta = 0.01
 
 def train_model():
-    wandb.init(project="enwik8-per-step-model", config={
+    wandb.init(project="recoder", config={
         "state_dim": 256,
         "batch_size": 64,
         "lr": 1e-3,
@@ -22,7 +22,7 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = download_enwik8()
     dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
-    eval_dataset = ByteSequenceDataset(data, block_size=cfg.block_size, eval=True)
+    eval_dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
     eval_loader = DataLoader(eval_dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=True)
 
