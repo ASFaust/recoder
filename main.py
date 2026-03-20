@@ -6,7 +6,7 @@ import wandb
 from dataset import download_enwik8, ByteSequenceDataset
 from model import Encoder, Decoder
 
-sqrt_beta = 0.01
+sqrt_beta = 0.03
 
 def train_model():
     wandb.init(project="recoder", config={
@@ -15,7 +15,8 @@ def train_model():
         "lr": 1e-3,
         "epochs": 3,
         "block_size": 512,
-        "log_interval": 100
+        "log_interval": 100,
+        "sqrt_beta": sqrt_beta,
     })
     cfg = wandb.config
 
