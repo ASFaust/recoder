@@ -6,11 +6,11 @@ import wandb
 from dataset import download_enwik8, ByteSequenceDataset
 from model import Encoder, Decoder
 
-sqrt_beta = 0.1
+sqrt_beta = 0.01
 
 def train_model():
     wandb.init(project="enwik8-per-step-model", config={
-        "state_dim": 128,
+        "state_dim": 256,
         "batch_size": 64,
         "lr": 1e-3,
         "epochs": 3,
@@ -22,6 +22,7 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = download_enwik8()
     dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
+    eval_dataset = ByteSequenceDataset(data, block_size=cfg.block_size, eval=True)
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
 
     encoder = Encoder(cfg.state_dim).to(device)
@@ -83,7 +84,7 @@ def train_model():
 
                 h = h_next.detach()
                 global_step += 1
-
+            
             with torch.no_grad():
                 h_seq = [torch.zeros_like(h) for _ in range(x_seq.size(1) + 1)]
                 # Initialize h_seq[0] with the same initial state as training
@@ -109,19 +110,19 @@ def train_model():
                     x_correct.append(is_correct.float())
 
                 x_correct = torch.stack(list(reversed(x_correct)), dim=1)  # shape (B, T)
-                accuracy = x_correct.sum().item() / cfg.batch_size  # mean number of correct tokens per seq
+                correct_token_count = x_correct.sum().item() / cfg.batch_size  # mean number of correct tokens per seq
 
                 # Fill in full length for perfect sequences
                 mean_first_error = sum(first_faulty) / len(first_faulty)
 
                 wandb.log({
-                    "reverse_reconstruction_accuracy": accuracy,
-                    "mean_steps_to_first_error": mean_first_error,
+                    "eval/correct_token_count": correct_token_count,
+                    "eval/mean_steps_to_first_error": mean_first_error,
                     "step": global_step
                 })
                 print(
-                    f"\nEpoch {epoch + 1}/{cfg.epochs}, Reverse Accuracy: {accuracy:.4f}, Mean Steps to First Error: {mean_first_error:.2f}")
-
+                    f"\nEpoch {epoch + 1}/{cfg.epochs}, Eval Correct Tokens per Seq: {correct_token_count:.2f}, Mean Steps to First Error: {mean_first_error:.2f}"
+                )
 
 if __name__ == "__main__":
     train_model()
