@@ -24,6 +24,7 @@ def train_model():
     dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
     eval_dataset = ByteSequenceDataset(data, block_size=cfg.block_size, eval=True)
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
+    eval_loader = DataLoader(eval_dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=True)
 
     encoder = Encoder(cfg.state_dim).to(device)
     decoder = Decoder(cfg.state_dim).to(device)
@@ -31,7 +32,7 @@ def train_model():
 
     global_step = 0
     for epoch in range(cfg.epochs):
-        for batch in loader:
+        for batch, eval_batch in zip(loader, eval_loader):
             x_seq = batch.to(device)
             h = torch.zeros((cfg.batch_size, cfg.state_dim), device=device)
             h[:, 0] = 1.0 # initial h with first dimension set to 1, rest 0
@@ -86,6 +87,7 @@ def train_model():
                 global_step += 1
             
             with torch.no_grad():
+                x_seq = eval_batch.to(device)
                 h_seq = [torch.zeros_like(h) for _ in range(x_seq.size(1) + 1)]
                 # Initialize h_seq[0] with the same initial state as training
                 h_seq[0][:, 0] = 1.0
