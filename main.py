@@ -2,11 +2,36 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import wandb
+import math
 
 from dataset import download_enwik8, ByteSequenceDataset
 from model import Encoder, Decoder
 
-sqrt_beta = 0.03
+theta = 0.3  # max angle for noise cone in radians
+
+def sample_cone_noise(h, theta_max):
+    """
+    Sample points on the unit sphere inside a cone of half-angle theta_max around h.
+    h: (..., d), assumed unit norm.
+    Returns: (..., d), unit norm, with angle to h in [0, theta_max].
+    """
+    *batch, d = h.shape
+    device, dtype = h.device, h.dtype
+
+    # 1) tangent direction u: unit vector in the tangent space of h
+    g = torch.randn(*batch, d, device=device, dtype=dtype)
+    g = g - (g * h).sum(dim=-1, keepdim=True) * h
+    u = F.normalize(g, dim=-1)  # (..., d), orthogonal to h, unit norm
+
+    # 2) polar angle theta in [0, theta_max]
+    # uniform on the spherical cap: cos(theta) ~ U[cos(theta_max), 1]
+    c_min = math.cos(theta_max)
+    cos_theta = c_min + (1.0 - c_min) * torch.rand(*batch, 1, device=device, dtype=dtype)
+
+    sin_theta = torch.sqrt(torch.clamp(1.0 - cos_theta**2, min=0.0))
+
+    # 3) combine: rotate e_z -> h implicitly via the (h, u) frame
+    return cos_theta * h + sin_theta * u
 
 def train_model():
     wandb.init(project="recoder", config={
@@ -16,10 +41,10 @@ def train_model():
         "epochs": 3,
         "block_size": 512,
         "log_interval": 100,
-        "sqrt_beta": sqrt_beta,
+        "theta": theta,  # max angle for noise cone
+        "eps": 1e-7,  # small constant for numerical stability
     })
     cfg = wandb.config
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = download_enwik8()
     dataset = ByteSequenceDataset(data, block_size=cfg.block_size)
@@ -43,17 +68,15 @@ def train_model():
                 # encoder output on sphere
                 h_next = F.normalize(encoder(h, x_t), dim=-1)
 
-                # tangent space langevin noise
-                noise = torch.randn_like(h_next)
-                noise = noise - (noise * h_next).sum(dim=-1, keepdim=True) * h_next
-                h_next_noised = F.normalize(h_next + sqrt_beta * noise, dim=-1)
+                # add noise in a cone around h_next
+                h_next_noised = sample_cone_noise(h_next, cfg.theta)
 
                 # decoder reconstructs previous state and input
                 h_recon, logits = decoder(h_next_noised)
                 h_recon = F.normalize(h_recon, dim=-1)
 
                 # cosine loss on sphere, CE loss for bytes
-                loss_h = 1 - (h_recon * h.detach()).sum(dim=-1).mean()
+                loss_h = torch.acos((h_recon * h).sum(-1).clamp(-1+cfg.eps, 1-cfg.eps)).mean()
                 loss_x = F.cross_entropy(logits, x_t)
 
                 # cosine similarity matrix over batch
@@ -62,7 +85,11 @@ def train_model():
                 mask = 1 - torch.eye(cfg.batch_size, device=device)
                 loss_spread = (S * mask).pow(2).mean()
 
-                loss = loss_h + loss_x #+ 0.1 * loss_spread
+                # we want the mean angle to be close to 2*theta
+                successive_cos_sim = (h_next * h).sum(dim=-1).mean()
+                successive_cos_sim_loss = (successive_cos_sim - math.cos(3 * cfg.theta)).pow(2)
+
+                loss = loss_h + loss_x #+ successive_cos_sim_loss
 
                 opt.zero_grad()
                 loss.backward()
@@ -74,12 +101,12 @@ def train_model():
                         "loss/cos_h": loss_h.item(),
                         "loss/ce_x": loss_x.item(),
                         "loss/spread": loss_spread.item(),
-                        "loss/ratio_h_to_x": loss_h.item() / (loss_x.item() + 1e-8),
-                        "state/mean_norm": h_next.norm(dim=-1).mean().item(),
-                        "state/mean_std": h.std(dim=0).mean().item(),
+                        "loss/successive_cos_sim": successive_cos_sim_loss.item(),
+                        "state/mean_cos_sim": successive_cos_sim.mean().item(),
+                        "state/mean_std": h_next.std(dim=0).mean().item(),
                         "state/delta_norm": (h_next - h).norm(dim=-1).mean().item(),
-                        "state/h_variance": h.var(dim=0).mean().item(),
-                        "state/mean_cos_sim": (F.normalize(h_recon, dim=-1) * h).sum(dim=-1).mean().item(),
+                        "state/reconstruction_cos_sim": (F.normalize(h_recon, dim=-1) * h).sum(dim=-1).mean().item(),
+                        "state/successive_cos_sim": (h_next * h).sum(dim=-1).mean().item(),
                         "step": global_step,
                     })
                     print(f"\rEpoch {epoch+1}/{cfg.epochs}, Step {global_step}, Loss: {loss.item():.4f}", end='', flush=True)
